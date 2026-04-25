@@ -1,0 +1,44 @@
+# ===================== 核心：防止 .env 泄露 =====================
+.env
+.env.local
+.env.*.local
+
+# ===================== Python 标准忽略项 =====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===================== 虚拟环境（你的 langchain-env） =====================
+venv/
+env/
+ENV/
+agent/
+langchain-env/
+
+# ===================== IDE 配置文件 =====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===================== LangGraph 临时文件 =====================
+*.db
+*.sqlite
