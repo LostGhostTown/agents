@@ -38,21 +38,20 @@ prompt = PromptTemplate(
 #调大模型
 from langchain_openai import ChatOpenAI
 qianFan = ChatOpenAI(
-    model="ernie-4.5-turbo-vl",
+    model="ernie-4.5-turbo-20260402",
     api_key=QIANFAN_API_KEY,
     base_url=QIANFAN_URL,
-    temperature=0.8, 
-    top_p=0.2,
+    temperature=0.2, 
     rate_limiter=rate_limiter,
     max_retries=3,  # 失败自动重试3次
-    extra_body={ 
-        "fps":2, 
-        "penalty_score":1, 
-        "stop":[], 
-        "use_audio":True, 
-        "compression":True,
-        "enable_thinking": True
-    }
+    #extra_body={ 
+    #    "fps":2, 
+    #    "penalty_score":1, 
+    #    "stop":[], 
+    #    "use_audio":True, 
+    #    "compression":True,
+    #    "enable_thinking": True
+    #}
 )
 #绑定解析器
-chain = prompt | qianFan | json_parser
+#chain = prompt | qianFan | json_parser

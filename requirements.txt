@@ -1,5 +1,4 @@
-# Editable install with no version control (agent==0.1.0)
--e d:\bc\agent
+
 annotated-types==0.7.0
 anyio==4.13.0
 blockbuster==1.5.26
