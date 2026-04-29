@@ -15,6 +15,7 @@ rate_limiter = InMemoryRateLimiter(
 )
 
 #格式化输出   json解析器
+#langchain有.with_structured_output方法，在调用大模型时使用，会返回一个字典或pydantic对象。需要传入详见结构化输出.py
 from langchain_core.output_parsers import SimpleJsonOutputParser
 from langchain_core.prompts import PromptTemplate
 json_parser = SimpleJsonOutputParser()
@@ -38,7 +39,7 @@ prompt = PromptTemplate(
 #调大模型
 from langchain_openai import ChatOpenAI
 qianFan = ChatOpenAI(
-    model="ernie-4.5-turbo-20260402",
+    model="ernie-4.5-turbo-vl",
     api_key=QIANFAN_API_KEY,
     base_url=QIANFAN_URL,
     temperature=0.2, 
@@ -54,4 +55,4 @@ qianFan = ChatOpenAI(
     #}
 )
 #绑定解析器
-#chain = prompt | qianFan | json_parser
+chain = prompt | qianFan | json_parser
