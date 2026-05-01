@@ -1,37 +1,206 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, SystemMessage
+from langchain_community.chat_message_histories import SQLChatMessageHistory
+from pydantic import BaseModel, Field
+from typing import List
 from my_agent.mylm import qianFan
 
-prompt = ChatPromptTemplate.from_messages(#聊天提示结构
-    [('system', '你是一个沟通助手，你需要根据用户的输入，提供的聊天历史记录包含用户和助手的对话，进行智能处理，调用合适的工具，并给出相应的答案。'),
-    MessagesPlaceholder(variable_name="chat_history", optional=True),#聊天历史记录占位符，optional=True表示可选
-    ('human', '{input}'),#用户输入占位符
-    MessagesPlaceholder(variable_name="agent_scratchpad", optional=True),#agent_scratchpad(智能体草稿本,储存思考过程)占位符，optional=True表示可选
-    ]
+# ==========================================
+# 1. 核心配置
+# ==========================================
+LATEST_KEEP_ROUNDS = 2  # 第一层：最新2轮完整保留
+MIDDLE_SUMMARY_ROUNDS = 3  # 第二层：中期3轮逐轮摘要
+EARLY_SUMMARY_THRESHOLD = 5  # 超过5轮触发第三层全局摘要
+
+# ==========================================
+# 2. 定义Pydantic结构（锁死输出格式）
+# ==========================================
+class SingleRoundSummary(BaseModel):
+    """单轮对话摘要结构"""
+    user_summary: str = Field(description="用户提问核心内容，1句话")
+    assistant_summary: str = Field(description="助手回复核心内容，1句话")
+
+class GlobalEarlyHistorySummary(BaseModel):
+    """早期对话全局摘要结构"""
+    user_core_info: str = Field(description="用户固定核心信息，1-2句话")
+    dialogue_core_goal: str = Field(description="对话核心任务，1句话")
+    closed_matters: List[str] = Field(description="已闭环事项，每条不超过20字")
+    long_term_constraints: List[str] = Field(description="长期约束要求，每条不超过20字")
+
+# ==========================================
+# 3. 构建摘要Chain
+# ==========================================
+# 第二层：单轮摘要Chain
+second_level_prompt = ChatPromptTemplate.from_messages([
+    ("system", """你是一个专业的对话摘要助手。
+请严格遵守以下规则：
+1. 对给定的「用户提问+助手回答」做摘要
+2. 每部分1-2句话，必须简洁
+3. 100%保留关键实体、数字、约束
+4. 把代词替换成具体实体
+5. 严格按照JSON格式输出"""),
+    ("human", """请对以下单轮对话做摘要：
+【用户提问】{user_content}
+【助手回答】{assistant_content}""")
+])
+second_level_chain = second_level_prompt | qianFan.with_structured_output(SingleRoundSummary, method="json_mode")
+
+# 第三层：全局摘要Chain
+third_level_prompt = ChatPromptTemplate.from_messages([
+    ("system", """你是一个专业的对话全局摘要助手。
+请严格遵守以下规则：
+1. 对早期多轮对话做全局合并摘要，禁止分轮次
+2. 仅保留长期有效信息，剔除临时内容
+3. 100%保留用户身份、技术栈、核心目标
+4. 严格按照JSON格式输出"""),
+    ("human", """请对以下早期对话做全局摘要：
+【完整早期对话】
+{all_early_dialogue}""")
+])
+third_level_chain = third_level_prompt | qianFan.with_structured_output(GlobalEarlyHistorySummary, method="json_mode")
+
+# ==========================================
+# 4. 核心：分层处理函数（不修改原始历史，仅返回处理后的列表）
+# ==========================================
+def compress_chat_history(messages: List[BaseMessage]) -> List[BaseMessage]:
+    """
+    对聊天历史做分层剪辑/摘要
+    :param messages: 原始历史消息列表
+    :return: 处理后的消息列表（不修改原始数据）
+    """
+    # 1. 把消息配对成完整轮次
+    rounds = []
+    i = 0
+    while i < len(messages):
+        if isinstance(messages[i], HumanMessage) and i+1 < len(messages) and isinstance(messages[i+1], AIMessage):
+            rounds.append((messages[i], messages[i+1]))
+            i += 2
+        else:
+            i += 1
+    
+    total_rounds = len(rounds)
+    if total_rounds <= LATEST_KEEP_ROUNDS:
+        return messages  # 轮数太少，直接返回原始消息
+
+    # --------------------------
+    # 第一层：最新N轮，完整保留
+    # --------------------------
+    latest_rounds = rounds[-LATEST_KEEP_ROUNDS:]
+    latest_messages = []
+    for u, a in latest_rounds:
+        latest_messages.append(u)
+        latest_messages.append(a)
+
+    remaining_rounds = rounds[:-LATEST_KEEP_ROUNDS]
+    remaining_total = len(remaining_rounds)
+    middle_summary_messages = []
+    early_summary_messages = []
+
+    # --------------------------
+    # 第二层：中期M轮，逐轮摘要
+    # --------------------------
+    if remaining_total > 0:
+        middle_rounds = remaining_rounds[-MIDDLE_SUMMARY_ROUNDS:] if remaining_total > MIDDLE_SUMMARY_ROUNDS else remaining_rounds
+        early_rounds = remaining_rounds[:-MIDDLE_SUMMARY_ROUNDS] if remaining_total > MIDDLE_SUMMARY_ROUNDS else []
+
+        if middle_rounds:
+            middle_summaries = []
+            for idx, (user_msg, ai_msg) in enumerate(middle_rounds):
+                try:
+                    single_summary = second_level_chain.invoke({
+                        "user_content": user_msg.content,
+                        "assistant_content": ai_msg.content
+                    })
+                    middle_summaries.append(f"【中期第{total_rounds - len(middle_rounds) + idx +1}轮】用户：{single_summary.user_summary} | 助手：{single_summary.assistant_summary}")
+                except Exception as e:
+                    middle_summaries.append(f"【中期第{total_rounds - len(middle_rounds) + idx +1}轮】用户：{user_msg.content[:50]}... | 助手：{ai_msg.content[:50]}...")
+            
+            middle_summary_text = "【中期对话摘要】\n" + "\n".join(middle_summaries)
+            middle_summary_messages = [HumanMessage(content=middle_summary_text)]
+
+        # --------------------------
+        # 第三层：早期轮次，全局摘要
+        # --------------------------
+        if early_rounds and len(early_rounds) >= EARLY_SUMMARY_THRESHOLD:
+            early_dialogue_text = ""
+            for idx, (user_msg, ai_msg) in enumerate(early_rounds):
+                early_dialogue_text += f"第{idx+1}轮\n用户：{user_msg.content}\n助手：{ai_msg.content}\n\n"
+            
+            try:
+                global_summary = third_level_chain.invoke({"all_early_dialogue": early_dialogue_text})
+                early_summary_text = f"""【早期对话全局摘要】
+1. 用户核心信息：{global_summary.user_core_info}
+2. 对话核心目标：{global_summary.dialogue_core_goal}
+3. 已闭环事项：{'; '.join(global_summary.closed_matters) if global_summary.closed_matters else '无'}
+4. 长期约束要求：{'; '.join(global_summary.long_term_constraints) if global_summary.long_term_constraints else '无'}
+"""
+                early_summary_messages = [SystemMessage(content=early_summary_text)]
+            except Exception as e:
+                early_summary_messages = []
+
+    # 最终拼接
+    return early_summary_messages + middle_summary_messages + latest_messages
+
+# ==========================================
+# 5. 构建主聊天Chain（整合摘要功能）
+# ==========================================
+prompt = ChatPromptTemplate.from_messages([
+    ('system', '你是一个沟通助手，根据用户输入、聊天历史，调用合适的工具，并给出相应的答案。如果有【早期/中期对话摘要】，请参考摘要理解上下文。'),
+    MessagesPlaceholder(variable_name="chat_history", optional=True),
+    ('human', '{input}'),
+    MessagesPlaceholder(variable_name="agent_scratchpad", optional=True),
+])
+
+# 核心：在Chain里插入摘要处理（不修改原始历史，仅在调用时临时处理）
+main_chain = (
+    RunnablePassthrough.assign(
+        chat_history=lambda x: compress_chat_history(x["chat_history"])
+    )
+    | prompt
+    | qianFan
 )
 
-chain = prompt | qianFan
+# ==========================================
+# 6. 封装带历史的Chain
+# ==========================================
+def get_chat_history(session_id: str):
+    return SQLChatMessageHistory(
+        session_id=session_id,
+        connection='sqlite:///chat_history.db'
+    )
 
-#存储聊天记录 内存或者数据库
-from langchain_core.chat_history  import InMemoryChatMessageHistory
-history = {}#key为会话id，value为聊天历史记录
-def get_chat_history(session_id:str):
-    """从内存中的历史记录中获取指定会话id的聊天历史记录"""
-    if session_id not in history:
-        history[session_id] = InMemoryChatMessageHistory()
-    return history[session_id]
-
-
-# “自动对话历史记忆” 
-from langchain_core.runnables.history import RunnableWithMessageHistory
-chain_with_message_history = RunnableWithMessageHistory(
-    chain,
+chain_with_history = RunnableWithMessageHistory(
+    main_chain,
     get_chat_history,
     input_messages_key='input',
     history_messages_key='chat_history'
 )
 
-result = chain_with_message_history.invoke({'input': '你好，我是Y'}, config={"configurable":{"session_id": "1234567890"}})
-print(result)
-
-result = chain_with_message_history.invoke({'input': '你好，我是谁？'}, config={"configurable":{"session_id": "1234567890"}})
-print(result)
+# ==========================================
+# 7. 测试运行
+# ==========================================
+if __name__ == "__main__":
+    print("🤖 带上下文摘要的聊天机器人已启动（输入 '退出' 结束）")
+    session_id = "user_test_001"
+    
+    # 先清空之前的测试数据
+    #test_history = get_chat_history(session_id)
+    #test_history.clear()
+    
+    while True:
+        user_input = input("\n你: ")
+        if user_input == "退出":
+            print("🤖 再见！")
+            break
+        
+        # 打印原始历史长度，方便对比
+        raw_history = get_chat_history(session_id).messages
+        print(f"📊 原始历史轮数：{len(raw_history)//2} 轮")
+        
+        resp = chain_with_history.invoke(
+            {'input': user_input},
+            config={"configurable": {"session_id": session_id}}
+        )
+        print(f"🤖: {resp.content}")
