@@ -5,6 +5,12 @@ from pydantic import BaseModel, Field
 from typing import List
 from my_agent.mylm import qianFan  # 导入你的模型实例
 
+
+
+#可以考虑替换为postgresql并使用checkpoint
+
+
+
 # ==========================================
 # 1. 历史压缩配置（可根据需求调整）
 # ==========================================
