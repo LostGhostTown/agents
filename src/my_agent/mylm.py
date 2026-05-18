@@ -39,12 +39,13 @@ prompt = PromptTemplate(
 #调大模型
 from langchain_openai import ChatOpenAI
 qianFan = ChatOpenAI(
-    model="ernie-4.5-turbo-vl",
+    model="deepseek-v4-pro",
     api_key=QIANFAN_API_KEY,
     base_url=QIANFAN_URL,
     temperature=0.2, 
     rate_limiter=rate_limiter,
     max_retries=3,  # 失败自动重试3次
+    timeout=120
     #extra_body={ 
     #    "fps":2, 
     #    "penalty_score":1, 
