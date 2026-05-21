@@ -8,9 +8,11 @@ import os
 import json
 import requests
 import httpx
-from typing import Optional, Iterator, AsyncIterator, Dict, Any
+from typing import Optional, Iterator, AsyncIterator, Dict, Any, Type
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from langchain_core.tools import BaseTool
+from pydantic import BaseModel, Field
 
 # 自动加载.env文件（如果存在）
 load_dotenv(override=True)
@@ -75,7 +77,8 @@ class QianfanCodeInterpreter:
             CodeInterpreterResponse: 包含回答、生成的代码和执行结果
         """
         try:
-            payload = {"query": query}
+            # ✅ 修复：正确的请求格式（与搜索工具一致）
+            payload = {"messages": [{"role": "user", "content": query}]}
             
             response = requests.post(
                 self.base_url,
@@ -119,7 +122,7 @@ class QianfanCodeInterpreter:
             CodeInterpreterResponse: 逐步返回的响应片段
         """
         try:
-            payload = {"query": query, "stream": True}
+            payload = {"messages": [{"role": "user", "content": query}], "stream": True}
             
             with requests.post(
                 self.base_url,
@@ -161,7 +164,7 @@ class QianfanCodeInterpreter:
             CodeInterpreterResponse: 包含回答、生成的代码和执行结果
         """
         try:
-            payload = {"query": query}
+            payload = {"messages": [{"role": "user", "content": query}]}
             
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
@@ -205,7 +208,7 @@ class QianfanCodeInterpreter:
             CodeInterpreterResponse: 逐步返回的响应片段
         """
         try:
-            payload = {"query": query, "stream": True}
+            payload = {"messages": [{"role": "user", "content": query}], "stream": True}
             
             async with httpx.AsyncClient(timeout=self.stream_timeout) as client:
                 async with client.stream(
@@ -261,22 +264,49 @@ class QianfanCodeInterpreter:
             is_success=True
         )
 
-# 全局单例实例（方便其他模块直接导入使用）
+# 全局单例实例
 code_interpreter = QianfanCodeInterpreter()
 
+# ✅ 修复：改为BaseTool实现，支持异步调用
+class RunCodeArgs(BaseModel):
+    query: str = Field(description="用户的问题或需求，描述清楚需要解决的问题")
 
-from langchain_core.tools import tool
-@tool
-def run_code(query: str) -> str:
-    """
-    代码解释器工具，可以执行Python代码解决数学计算、数据分析、绘图等问题
+class RunCodeTool(BaseTool):
+    name: str = "run_code"
+    description: str = """代码解释器工具，可以执行Python代码解决数学计算、数据分析、绘图等问题。
+    当用户需要进行数值计算、数据处理、生成图表或执行任何需要代码的任务时使用此工具。
+"""
+    return_direct: bool = False
+    args_schema: Type[BaseModel] = RunCodeArgs
     
-    Args:
-        query: 用户的问题或需求，描述清楚需要解决的问题
-    """
-    result = code_interpreter.invoke(query)
+    def _run(self, query: str) -> str:
+        result = code_interpreter.invoke(query)
+        
+        if result.is_success:
+            # ✅ 修复：返回完整的执行信息，包括代码和输出
+            formatted_result = "【代码执行结果】\n"
+            if result.code_generated:
+                formatted_result += f"\n生成的代码：\n```python\n{result.code_generated}\n```\n"
+            if result.code_output:
+                formatted_result += f"\n执行输出：\n{result.code_output}\n"
+            formatted_result += f"\n回答：{result.content}"
+            return formatted_result
+        else:
+            return f"代码执行失败: {result.error_message}"
     
-    if result.is_success:
-        return result.content
-    else:
-        return f"代码执行失败: {result.error_message}"
+    async def _arun(self, query: str) -> str:
+        result = await code_interpreter.ainvoke(query)
+        
+        if result.is_success:
+            formatted_result = "【代码执行结果】\n"
+            if result.code_generated:
+                formatted_result += f"\n生成的代码：\n```python\n{result.code_generated}\n```\n"
+            if result.code_output:
+                formatted_result += f"\n执行输出：\n{result.code_output}\n"
+            formatted_result += f"\n回答：{result.content}"
+            return formatted_result
+        else:
+            return f"代码执行失败: {result.error_message}"
+
+# 导出工具实例（与原接口保持兼容）
+run_code = RunCodeTool()
